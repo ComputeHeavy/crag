@@ -1,16 +1,10 @@
 import tree_sitter as ts
 import pprint
+import click
 import enum
 
-'''
-TODO
-    convert line offsets to byte offsets
-    pass file or pass file name
-    index
-
-DONE
-
-'''
+tabwidth = 4
+tab = ' '*tabwidth
 
 def format_sexpression(s, indent_level=0, indent_size=2):
     output = ""
@@ -70,124 +64,204 @@ def traverse_parents(node):
 
     return class_name, decorator
 
-named_function_query = PY_LANGUAGE.query(f"""
-    (module [
-        (function_definition
-            name: (identifier) @_fname
-            (#eq? @_fname "{fname}")) @fdef
-        (decorated_definition
-            definition: (function_definition
-                name: (identifier) @_fname
-                (#eq? @_fname "{fname}")) @fdef)
-    ])
-    """)
-
-class_query = PY_LANGUAGE.query(f"""
-    (class_definition
-        name: (identifier) @_cname
-        (#eq? @_cname "{cname}")) @cdef
-    """)
-
-method_query = PY_LANGUAGE.query(f"""
-    (function_definition
-        name: (identifier) @_fname
-        (#eq? #_fname "{fname}")) @fdef
-    """)
-
-class_method_query = PY_LANGUAGE.query(f"""
-    (class_definition
-        name: (identifier) @_cname
-        (#eq? @_cname "{cname}")
-        body: (block [
+def named_function_query(lang, fname): 
+    return lang.query(f"""
+        (module [
             (function_definition
                 name: (identifier) @_fname
                 (#eq? @_fname "{fname}")) @fdef
             (decorated_definition
                 definition: (function_definition
                     name: (identifier) @_fname
-                    (#eq? @_fname "{fname}")) @fdef)
-        ]))""")
+                    (#eq? @_fname "{fname}"))) @ddef
+        ])
+        """)
 
-[ea[0] for ea in class_method_query.captures(tree.root_node) 
-    if not ea[1].startswith("_")]
+def class_method_query(lang, cname, fname):
+    return lang.query(f"""
+        (class_definition
+            name: (identifier) @_cname
+            (#eq? @_cname "{cname}")
+            body: (block [
+                (function_definition
+                    name: (identifier) @_fname
+                    (#eq? @_fname "{fname}")) @fdef
+                (decorated_definition
+                    definition: (function_definition
+                        name: (identifier) @_fname
+                        (#eq? @_fname "{fname}"))) @ddef
+            ]))""")
 
-class File:
-    def __init__(self, name):
-        self.name = name
-        self.functions = {}
-        self.classes = {}
+def class_query(lang, cname):
+    return lang.query(f"""
+        (class_definition
+            name: (identifier) @_cname
+            (#eq? @_cname "{cname}")) @cdef
+        """)
 
-class Class:
-    def __init__(self, name, start, end):
-        self.name = name
-        self.functions = {}
-        self.start = start  
-        self.end = end
+def clean(captures):
+    return [ea[0] for ea in captures if not ea[1].startswith("_")]
 
-    def summary(self, f):
-        out = f"class {self.name}:"
-        if "__init__" in self.functions:
-            init = self.functions["__init__"]
+def load_parser(lang):
+    langlib = 'build/lang-lib.so'
 
-class Function:
-    def __init__(self, name, params, start, end, decorator):
-        self.name = name
-        self.params = params
-        self.start = start  
-        self.end = end
+    ts.Language.build_library(
+      langlib,
+      [
+        'tree-sitter-python'
+      ]
+    )
 
-    def signature(self):
-        return f"{name}{params}"
+    PY_LANGUAGE = ts.Language(langlib, lang)
 
-    def full(self, fname):
-        with open(fname) as f:
-            c = f.read
+    parser = ts.Parser()
+    parser.set_language(PY_LANGUAGE)
 
-langlib = 'build/lang-lib.so'
+    return PY_LANGUAGE, parser
 
-ts.Language.build_library(
-  langlib,
-  [
-    'tree-sitter-python'
-  ]
-)
+@click.group()
+def cli():
+    pass
 
-PY_LANGUAGE = ts.Language(langlib, 'python')
+class Bar:
+    pass
 
-parser = ts.Parser()
-parser.set_language(PY_LANGUAGE)
+class Baz:
+    pass
 
-# code = """
-# def dogslol():
-#     foo()
+class Foo(Bar, Baz):
+    '''doc string'''
+    def __init__(self):
+        pass
 
-# def foo(x: int, y):
-#     if bar:
-#         baz()
-# """
+    def bar(self):
+        """doc string"""
+        pass
 
-# tree = parser.parse(bytes(code, "utf8"))
+@cli.command("fetch")
+@click.option("--file", required=True, type=str)
+@click.option("--class", "class_", required=False, type=str)
+@click.option("--function", required=False, type=str)
+def fetch(file, class_, function):
+    if class_ is None and function is None:
+        raise ValueError("must provide at least one of class or function")
 
-# with open("../gonk/src/api/server.py", "rb") as f:
-with open("../gonk/src/core/events.py", "rb") as f:
-    tree = parser.parse(f.read())
+    lang, parser = load_parser("python")
 
-# print(tree.root_node.sexp())
+    # with open("../gonk/src/api/server.py", "rb") as f:
+    with open(file, "rb") as f:
+        tree = parser.parse(f.read())
 
-print(format_sexpression(tree.root_node.sexp()))
+    # print(format_sexpression(tree.root_node.sexp()))
 
-query = PY_LANGUAGE.query("""
-(class_definition
-    name: (identifier) @class_name) 
-""")
+    if class_ and function:
+        q = class_method_query(lang, class_, function)
+    elif class_:
+        q = class_query(lang, class_)
+    elif function:
+        q = named_function_query(lang, function)
 
-captures = query.captures(tree.root_node)
+    caps = clean(q.captures(tree.root_node))
 
-classes = {}
+    if len(caps) == 0:
+        raise ValueError("nothing found")
 
-for class_name, _ in captures:
-    class_ = class_name.parent
-    classes[class_name.text.decode()] = (class_.start_point, class_.end_point)
+    if len(caps) > 1:
+        raise ValueError("multiple found")
+        
+    node, = caps
+
+    start = node.start_byte - node.start_point[1]
+    print(tree.root_node.text[start:node.end_byte].decode())
+
+    return node
+
+def class_info(lang, cnode):
+    name_query = lang.query(f"""
+        (class_definition 
+            name: (identifier) @name)
+        """)
+    name = name_query.captures(cnode)
+
+    if len(name) != 1:
+        raise ValueError("classname not found")
+
+    name, = [ea[0].text.decode() for ea in name]
+
+    super_query = lang.query(f"""
+        (class_definition 
+            superclasses: (argument_list
+                (identifier) @superclass))
+        """)
+
+    supers = super_query.captures(cnode)
+    supers = [ea[0].text.decode() for ea in supers]
+
+    docstring_query = lang.query(f"""
+        (class_definition 
+            body: (block
+                .
+                (expression_statement
+                    (string
+                        (string_content) @docstring))))
+        """)
+
+    docstring = docstring_query.captures(cnode)
+    docstring = [ea[0].text.decode() for ea in docstring]
+
+    if len(docstring) == 1:
+        docstring, = docstring
+    else:
+        docstring = ""
+
+    function_query = lang.query(f"""
+        (class_definition
+            body: (block [
+                (function_definition) @fdef
+                (decorated_definition
+                    definition: (function_definition)) @ddef
+            ]))
+        """)
+
+    functions = function_query.captures(cnode)
+    functions = [ea[0] for ea in functions]
+
+    return name, supers, docstring, function
+
+# @cli.command("summarize")
+# @click.option("--file", required=True, type=str)
+# @click.option("--class", "class_", required=True, type=str)
+def summarize(file, class_):
+    lang, parser = load_parser("python")
+
+    with open(file, "rb") as f:
+        tree = parser.parse(f.read())
+
+    q = class_query(lang, class_)
+    caps = clean(q.captures(tree.root_node))
+
+    if len(caps) == 0:
+        raise ValueError("nothing found")
+
+    if len(caps) > 1:
+        raise ValueError("multiple found")
+        
+    cnode, = caps
+
+    name, supers, docstring, functions = class_info(lang, cnode)
+
+    print(format_sexpression(cnode.sexp()))
+
+    print(f"class {name}({', '.join(supers)}):")
+    if docstring:
+        print(f'{tab}"""{docstring}"""')
+
+    print(functions)
+
+    return cnode
+
+if __name__ == "__main__":
+    cli()
 
 # pprint.pprint(classes)
 
@@ -202,63 +276,3 @@ function decorators
 class variables
 """
 
-query = PY_LANGUAGE.query("""
-(function_definition) @fndef
-""")
-
-captures = query.captures(tree.root_node)
-print(captures)
-
-query = PY_LANGUAGE.query("""
-(function_definition
-  name: (identifier) @name
-  parameters: (parameters) @params)
-""")
-
-# class: name: (start, end)
-functions = {}
-
-for function_definition, _ in captures:
-    captures = query.captures(function_definition)
-
-    if len(captures) < 2:
-        continue
-
-    if len(captures) > 2:
-        captures[:2]
-
-    name, params = captures[:2]
-
-    fn_name, _ = name
-    fn_params, _ = params
-    
-    parent, decorator = traverse_parents(function_definition)
-
-    print(parent)
-    print(decorator)
-
-    print(fn_name.text.decode(), fn_params.text.decode(), sep="")
-    print(function_definition.start_point)
-    print(function_definition.end_point)
-
-    print()
-
-    start = function_definition.start_point
-    end = function_definition.end_point
-
-    if parent not in functions:
-        functions[parent] = {}
-
-    if decorator is not None:
-        start = decorator.start_point
-        end = decorator.end_point
-
-    functions[parent][fn_name.text.decode()] = (start, end)
-
-#     print(fndef.text)
-#     sln, sidx  = fndef.parent.start_point
-#     eln, eidx = fndef.parent.end_point
-#     lines = code.split("\n")
-#     print("\n".join(lines[sln:eln+1]))
-
-pprint.pprint(functions)
