@@ -134,8 +134,17 @@ class Foo(Bar, Baz):
     def __init__(self):
         pass
 
-    def bar(self):
+    def bar(self, x: int):
         """doc string"""
+        pass
+
+    @staticmethod
+    @classmethod
+    def dogslol(self) -> (int, bool):
+        pass
+
+    @staticmethod
+    def something():
         pass
 
 @cli.command("fetch")
@@ -226,11 +235,67 @@ def class_info(lang, cnode):
     functions = function_query.captures(cnode)
     functions = [ea[0] for ea in functions]
 
-    return name, supers, docstring, function
+    return name, supers, docstring, functions
 
-# @cli.command("summarize")
-# @click.option("--file", required=True, type=str)
-# @click.option("--class", "class_", required=True, type=str)
+def function_info(lang, fnode):
+    decorator_query = lang.query(f"""
+        (decorated_definition 
+            (decorator
+                (identifier) @decorator))
+        """)
+
+    decorators = [ea[0].text.decode() for ea in decorator_query.captures(fnode)]
+
+    name_query = lang.query(f"""
+        (function_definition 
+            name: (identifier) @name)
+        """)
+
+    name, = [ea[0].text.decode() for ea in name_query.captures(fnode)]
+
+    params_query = lang.query(f"""
+        (function_definition 
+            parameters: (parameters [
+                (identifier) @param
+                (typed_parameter) @tparam
+            ]))
+        """)
+
+    params = [ea[0].text.decode() for ea in params_query.captures(fnode)]
+
+    return_query = lang.query(f"""
+        (function_definition 
+            return_type: (type) @return)
+        """)
+
+    ret_type = [ea[0].text.decode() for ea in return_query.captures(fnode)]
+
+    if len(ret_type) == 1:
+        ret_type, = ret_type
+    else:
+        ret_type = ""
+
+    docstring_query = lang.query(f"""
+        (function_definition 
+            body: (block
+                .
+                (expression_statement
+                    (string
+                        (string_content) @docstring))))
+        """)
+
+    docstring = [ea[0].text.decode() for ea in docstring_query.captures(fnode)]
+
+    if len(docstring) == 1:
+        docstring, = docstring
+    else:
+        docstring = ""
+
+    return decorators, name, params, ret_type, docstring
+
+@cli.command("summarize")
+@click.option("--file", required=True, type=str)
+@click.option("--class", "class_", required=True, type=str)
 def summarize(file, class_):
     lang, parser = load_parser("python")
 
@@ -250,13 +315,27 @@ def summarize(file, class_):
 
     name, supers, docstring, functions = class_info(lang, cnode)
 
-    print(format_sexpression(cnode.sexp()))
-
     print(f"class {name}({', '.join(supers)}):")
     if docstring:
         print(f'{tab}"""{docstring}"""')
+        print()
 
-    print(functions)
+    for function in functions:
+        decorators, name, params, ret_type, docstring = function_info(
+            lang, function)
+        for decorator in decorators:
+            print(f"{tab}@{decorator}")
+
+        print(f"{tab}def {name}({', '.join(params)})", end='')
+        if ret_type:
+            print(f" -> {ret_type}", end='')
+        print(":")
+
+        if docstring:
+            print(f'{tab*2}"""{docstring}"""')
+
+        print(f"{tab*2}pass\t# body omitted")
+        print()
 
     return cnode
 
