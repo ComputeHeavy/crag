@@ -5,7 +5,7 @@ This is a utility to help you fetch code snippets for injecting into prompts. Cu
 * Function from file
 * Class from file
 * Function from class from file
-* Summarize function
+* Summarize class
 
 ```bash
 python main.py fetch --file FILE.py --function FUNCTION_NAME
